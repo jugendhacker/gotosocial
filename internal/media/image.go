@@ -74,7 +74,7 @@ func decodeImage(r io.Reader, contentType string) (*imageMeta, error) {
 	case mimeImageJpeg:
 		i, err = jpeg.Decode(r)
 	case mimeImagePng:
-		i, err = png.Decode(r)
+		i, err = StrippedPngDecode(r)
 	default:
 		err = fmt.Errorf("content type %s not recognised", contentType)
 	}
@@ -117,7 +117,7 @@ func deriveThumbnail(r io.Reader, contentType string, createBlurhash bool) (*ima
 	case mimeImageJpeg:
 		i, err = jpeg.Decode(r)
 	case mimeImagePng:
-		i, err = png.Decode(r)
+		i, err = StrippedPngDecode(r)
 	case mimeImageGif:
 		i, err = gif.Decode(r)
 	default:
@@ -125,7 +125,7 @@ func deriveThumbnail(r io.Reader, contentType string, createBlurhash bool) (*ima
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error decoding image as %s: %s", contentType, err)
 	}
 
 	if i == nil {
@@ -151,7 +151,7 @@ func deriveThumbnail(r io.Reader, contentType string, createBlurhash bool) (*ima
 		tiny := resize.Thumbnail(32, 32, thumb, resize.NearestNeighbor)
 		bh, err := blurhash.Encode(4, 3, tiny)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error creating blurhash: %s", err)
 		}
 		im.blurhash = bh
 	}
@@ -161,7 +161,7 @@ func deriveThumbnail(r io.Reader, contentType string, createBlurhash bool) (*ima
 		// Quality isn't extremely important for thumbnails, so 75 is "good enough"
 		Quality: 75,
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error encoding thumbnail: %s", err)
 	}
 	im.small = out.Bytes()
 
@@ -175,7 +175,7 @@ func deriveStaticEmoji(r io.Reader, contentType string) (*imageMeta, error) {
 
 	switch contentType {
 	case mimeImagePng:
-		i, err = png.Decode(r)
+		i, err = StrippedPngDecode(r)
 		if err != nil {
 			return nil, err
 		}

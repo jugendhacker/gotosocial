@@ -24,7 +24,6 @@ import (
 	"net/url"
 
 	"codeberg.org/gruf/go-store/kv"
-	"github.com/sirupsen/logrus"
 	apimodel "github.com/superseriousbusiness/gotosocial/internal/api/model"
 	"github.com/superseriousbusiness/gotosocial/internal/db"
 	"github.com/superseriousbusiness/gotosocial/internal/email"
@@ -45,6 +44,7 @@ import (
 	"github.com/superseriousbusiness/gotosocial/internal/timeline"
 	"github.com/superseriousbusiness/gotosocial/internal/typeutils"
 	"github.com/superseriousbusiness/gotosocial/internal/visibility"
+	"github.com/superseriousbusiness/gotosocial/internal/worker"
 )
 
 // Processor should be passed to api modules (see internal/apimodule/...). It is used for
@@ -55,7 +55,7 @@ import (
 // for clean distribution of messages without slowing down the client API and harming the user experience.
 type Processor interface {
 	// Start starts the Processor, reading from its channels and passing messages back and forth.
-	Start(ctx context.Context) error
+	Start() error
 	// Stop stops the processor cleanly, finishing handling any remaining messages before closing down.
 	Stop() error
 	// ProcessFromClientAPI processes one message coming from the clientAPI channel, and triggers appropriate side effects.
@@ -73,13 +73,17 @@ type Processor interface {
 
 	// AccountCreate processes the given form for creating a new account, returning an oauth token for that account if successful.
 	AccountCreate(ctx context.Context, authed *oauth.Auth, form *apimodel.AccountCreateRequest) (*apimodel.Token, error)
+	// AccountDeleteLocal processes the delete of a LOCAL account using the given form.
+	AccountDeleteLocal(ctx context.Context, authed *oauth.Auth, form *apimodel.AccountDeleteRequest) gtserror.WithCode
 	// AccountGet processes the given request for account information.
-	AccountGet(ctx context.Context, authed *oauth.Auth, targetAccountID string) (*apimodel.Account, error)
+	AccountGet(ctx context.Context, authed *oauth.Auth, targetAccountID string) (*apimodel.Account, gtserror.WithCode)
+	// AccountGet processes the given request for account information.
+	AccountGetLocalByUsername(ctx context.Context, authed *oauth.Auth, username string) (*apimodel.Account, gtserror.WithCode)
 	// AccountUpdate processes the update of an account with the given form
 	AccountUpdate(ctx context.Context, authed *oauth.Auth, form *apimodel.UpdateCredentialsRequest) (*apimodel.Account, error)
 	// AccountStatusesGet fetches a number of statuses (in time descending order) from the given account, filtered by visibility for
 	// the account given in authed.
-	AccountStatusesGet(ctx context.Context, authed *oauth.Auth, targetAccountID string, limit int, excludeReplies bool, maxID string, minID string, pinned bool, mediaOnly bool, publicOnly bool) ([]apimodel.Status, gtserror.WithCode)
+	AccountStatusesGet(ctx context.Context, authed *oauth.Auth, targetAccountID string, limit int, excludeReplies bool, excludeReblogs bool, maxID string, minID string, pinned bool, mediaOnly bool, publicOnly bool) ([]apimodel.Status, gtserror.WithCode)
 	// AccountFollowersGet fetches a list of the target account's followers.
 	AccountFollowersGet(ctx context.Context, authed *oauth.Auth, targetAccountID string) ([]apimodel.Account, gtserror.WithCode)
 	// AccountFollowingGet fetches a list of the accounts that target account is following.
@@ -95,6 +99,8 @@ type Processor interface {
 	// AccountBlockRemove handles the removal of a block from authed account to target account, either remote or local.
 	AccountBlockRemove(ctx context.Context, authed *oauth.Auth, targetAccountID string) (*apimodel.Relationship, gtserror.WithCode)
 
+	// AdminAccountAction handles the creation/execution of an action on an account.
+	AdminAccountAction(ctx context.Context, authed *oauth.Auth, form *apimodel.AdminAccountActionRequest) gtserror.WithCode
 	// AdminEmojiCreate handles the creation of a new instance emoji by an admin, using the given form.
 	AdminEmojiCreate(ctx context.Context, authed *oauth.Auth, form *apimodel.EmojiCreateRequest) (*apimodel.Emoji, gtserror.WithCode)
 	// AdminDomainBlockCreate handles the creation of a new domain block by an admin, using the given form.
@@ -107,6 +113,8 @@ type Processor interface {
 	AdminDomainBlockGet(ctx context.Context, authed *oauth.Auth, id string, export bool) (*apimodel.DomainBlock, gtserror.WithCode)
 	// AdminDomainBlockDelete deletes one domain block, specified by ID, returning the deleted domain block.
 	AdminDomainBlockDelete(ctx context.Context, authed *oauth.Auth, id string) (*apimodel.DomainBlock, gtserror.WithCode)
+	// AdminMediaRemotePrune triggers a prune of remote media according to the given number of mediaRemoteCacheDays
+	AdminMediaRemotePrune(ctx context.Context, mediaRemoteCacheDays int) gtserror.WithCode
 
 	// AppCreate processes the creation of a new API application
 	AppCreate(ctx context.Context, authed *oauth.Auth, form *apimodel.ApplicationCreateRequest) (*apimodel.Application, error)
@@ -115,7 +123,7 @@ type Processor interface {
 	BlocksGet(ctx context.Context, authed *oauth.Auth, maxID string, sinceID string, limit int) (*apimodel.BlocksResponse, gtserror.WithCode)
 
 	// FileGet handles the fetching of a media attachment file via the fileserver.
-	FileGet(ctx context.Context, authed *oauth.Auth, form *apimodel.GetContentRequestForm) (*apimodel.Content, error)
+	FileGet(ctx context.Context, authed *oauth.Auth, form *apimodel.GetContentRequestForm) (*apimodel.Content, gtserror.WithCode)
 
 	// FollowRequestsGet handles the getting of the authed account's incoming follow requests
 	FollowRequestsGet(ctx context.Context, auth *oauth.Auth) ([]apimodel.Account, gtserror.WithCode)
@@ -229,10 +237,10 @@ type Processor interface {
 
 // processor just implements the Processor interface
 type processor struct {
-	fromClientAPI   chan messages.FromClientAPI
-	fromFederator   chan messages.FromFederator
+	clientWorker *worker.Worker[messages.FromClientAPI]
+	fedWorker    *worker.Worker[messages.FromFederator]
+
 	federator       federation.Federator
-	stop            chan interface{}
 	tc              typeutils.TypeConverter
 	oauthServer     oauth.Server
 	mediaManager    media.Manager
@@ -262,24 +270,26 @@ func NewProcessor(
 	mediaManager media.Manager,
 	storage *kv.KVStore,
 	db db.DB,
-	emailSender email.Sender) Processor {
-	fromClientAPI := make(chan messages.FromClientAPI, 1000)
-	fromFederator := make(chan messages.FromFederator, 1000)
+	emailSender email.Sender,
+	clientWorker *worker.Worker[messages.FromClientAPI],
+	fedWorker *worker.Worker[messages.FromFederator],
+) Processor {
+	parseMentionFunc := GetParseMentionFunc(db, federator)
 
-	statusProcessor := status.New(db, tc, fromClientAPI)
+	statusProcessor := status.New(db, tc, clientWorker, parseMentionFunc)
 	streamingProcessor := streaming.New(db, oauthServer)
-	accountProcessor := account.New(db, tc, mediaManager, oauthServer, fromClientAPI, federator)
-	adminProcessor := admin.New(db, tc, mediaManager, fromClientAPI)
-	mediaProcessor := mediaProcessor.New(db, tc, mediaManager, storage)
+	accountProcessor := account.New(db, tc, mediaManager, oauthServer, clientWorker, federator, parseMentionFunc)
+	adminProcessor := admin.New(db, tc, mediaManager, clientWorker)
+	mediaProcessor := mediaProcessor.New(db, tc, mediaManager, federator.TransportController(), storage)
 	userProcessor := user.New(db, emailSender)
-	federationProcessor := federationProcessor.New(db, tc, federator, fromFederator)
+	federationProcessor := federationProcessor.New(db, tc, federator)
 	filter := visibility.NewFilter(db)
 
 	return &processor{
-		fromClientAPI:   fromClientAPI,
-		fromFederator:   fromFederator,
+		clientWorker: clientWorker,
+		fedWorker:    fedWorker,
+
 		federator:       federator,
-		stop:            make(chan interface{}),
 		tc:              tc,
 		oauthServer:     oauthServer,
 		mediaManager:    mediaManager,
@@ -299,36 +309,29 @@ func NewProcessor(
 }
 
 // Start starts the Processor, reading from its channels and passing messages back and forth.
-func (p *processor) Start(ctx context.Context) error {
-	go func() {
-	DistLoop:
-		for {
-			select {
-			case clientMsg := <-p.fromClientAPI:
-				logrus.Tracef("received message FROM client API: %+v", clientMsg)
-				go func() {
-					if err := p.ProcessFromClientAPI(ctx, clientMsg); err != nil {
-						logrus.Error(err)
-					}
-				}()
-			case federatorMsg := <-p.fromFederator:
-				logrus.Tracef("received message FROM federator: %+v", federatorMsg)
-				go func() {
-					if err := p.ProcessFromFederator(ctx, federatorMsg); err != nil {
-						logrus.Error(err)
-					}
-				}()
-			case <-p.stop:
-				break DistLoop
-			}
-		}
-	}()
+func (p *processor) Start() error {
+	// Setup and start the client API worker pool
+	p.clientWorker.SetProcessor(p.ProcessFromClientAPI)
+	if err := p.clientWorker.Start(); err != nil {
+		return err
+	}
+
+	// Setup and start the federator worker pool
+	p.fedWorker.SetProcessor(p.ProcessFromFederator)
+	if err := p.fedWorker.Start(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // Stop stops the processor cleanly, finishing handling any remaining messages before closing down.
-// TODO: empty message buffer properly before stopping otherwise we'll lose federating messages.
 func (p *processor) Stop() error {
-	close(p.stop)
+	if err := p.clientWorker.Stop(); err != nil {
+		return err
+	}
+	if err := p.fedWorker.Stop(); err != nil {
+		return err
+	}
 	return nil
 }

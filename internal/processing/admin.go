@@ -26,6 +26,10 @@ import (
 	"github.com/superseriousbusiness/gotosocial/internal/oauth"
 )
 
+func (p *processor) AdminAccountAction(ctx context.Context, authed *oauth.Auth, form *apimodel.AdminAccountActionRequest) gtserror.WithCode {
+	return p.adminProcessor.AccountAction(ctx, authed.Account, form)
+}
+
 func (p *processor) AdminEmojiCreate(ctx context.Context, authed *oauth.Auth, form *apimodel.EmojiCreateRequest) (*apimodel.Emoji, gtserror.WithCode) {
 	return p.adminProcessor.EmojiCreate(ctx, authed.Account, authed.User, form)
 }
@@ -48,4 +52,8 @@ func (p *processor) AdminDomainBlockGet(ctx context.Context, authed *oauth.Auth,
 
 func (p *processor) AdminDomainBlockDelete(ctx context.Context, authed *oauth.Auth, id string) (*apimodel.DomainBlock, gtserror.WithCode) {
 	return p.adminProcessor.DomainBlockDelete(ctx, authed.Account, id)
+}
+
+func (p *processor) AdminMediaRemotePrune(ctx context.Context, mediaRemoteCacheDays int) gtserror.WithCode {
+	return p.adminProcessor.MediaRemotePrune(ctx, mediaRemoteCacheDays)
 }

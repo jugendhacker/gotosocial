@@ -59,6 +59,7 @@ func InitTestConfig() {
 // TestDefaults returns a Values struct with values set that are suitable for local testing.
 var TestDefaults = config.Values{
 	LogLevel:        "trace",
+	LogDbQueries:    true,
 	ApplicationName: "gotosocial",
 	ConfigPath:      "",
 	Host:            "localhost:8080",
@@ -86,6 +87,7 @@ var TestDefaults = config.Values{
 	MediaVideoMaxSize:        5242880, // 5mb
 	MediaDescriptionMinChars: 0,
 	MediaDescriptionMaxChars: 500,
+	MediaRemoteCacheDays:     30,
 
 	StorageBackend:       "local",
 	StorageLocalBasePath: "/gotosocial/storage",

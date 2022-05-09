@@ -21,6 +21,7 @@ package config
 // Values contains contains the type of each configuration value.
 type Values struct {
 	LogLevel        string
+	LogDbQueries    bool
 	ApplicationName string
 	ConfigPath      string
 	Host            string
@@ -51,6 +52,7 @@ type Values struct {
 	MediaVideoMaxSize        int
 	MediaDescriptionMinChars int
 	MediaDescriptionMaxChars int
+	MediaRemoteCacheDays     int
 
 	StorageBackend       string
 	StorageLocalBasePath string

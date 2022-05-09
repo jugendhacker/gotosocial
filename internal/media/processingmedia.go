@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"codeberg.org/gruf/go-store/kv"
+	"github.com/sirupsen/logrus"
 	terminator "github.com/superseriousbusiness/exif-terminator"
 	"github.com/superseriousbusiness/gotosocial/internal/db"
 	"github.com/superseriousbusiness/gotosocial/internal/gtsmodel"
@@ -66,6 +67,9 @@ type ProcessingMedia struct {
 
 	// track whether this media has already been put in the databse
 	insertedInDB bool
+
+	// true if this is a recache, false if it's brand new media
+	recache bool
 }
 
 // AttachmentID returns the ID of the underlying media attachment without blocking processing.
@@ -76,8 +80,10 @@ func (p *ProcessingMedia) AttachmentID() string {
 // LoadAttachment blocks until the thumbnail and fullsize content
 // has been processed, and then returns the completed attachment.
 func (p *ProcessingMedia) LoadAttachment(ctx context.Context) (*gtsmodel.MediaAttachment, error) {
+	logrus.Tracef("LoadAttachment: getting lock for attachment %s", p.attachment.URL)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	logrus.Tracef("LoadAttachment: got lock for attachment %s", p.attachment.URL)
 
 	if err := p.store(ctx); err != nil {
 		return nil, err
@@ -93,12 +99,21 @@ func (p *ProcessingMedia) LoadAttachment(ctx context.Context) (*gtsmodel.MediaAt
 
 	// store the result in the database before returning it
 	if !p.insertedInDB {
-		if err := p.database.Put(ctx, p.attachment); err != nil {
-			return nil, err
+		if p.recache {
+			// if it's a recache we should only need to update
+			if err := p.database.UpdateByPrimaryKey(ctx, p.attachment); err != nil {
+				return nil, err
+			}
+		} else {
+			// otherwise we need to really PUT it
+			if err := p.database.Put(ctx, p.attachment); err != nil {
+				return nil, err
+			}
 		}
 		p.insertedInDB = true
 	}
 
+	logrus.Tracef("LoadAttachment: finished, returning attachment %s", p.attachment.URL)
 	return p.attachment, nil
 }
 
@@ -121,7 +136,8 @@ func (p *ProcessingMedia) loadThumb(ctx context.Context) error {
 			createBlurhash = true
 		}
 
-		// stream the original file out of storage...
+		// stream the original file out of storage
+		logrus.Tracef("loadThumb: fetching attachment from storage %s", p.attachment.URL)
 		stored, err := p.storage.GetStream(p.attachment.File.Path)
 		if err != nil {
 			p.err = fmt.Errorf("loadThumb: error fetching file from storage: %s", err)
@@ -129,7 +145,16 @@ func (p *ProcessingMedia) loadThumb(ctx context.Context) error {
 			return p.err
 		}
 
-		// ... and into the derive thumbnail function
+		// whatever happens, close the stream when we're done
+		defer func() {
+			logrus.Tracef("loadThumb: closing stored stream %s", p.attachment.URL)
+			if err := stored.Close(); err != nil {
+				logrus.Errorf("loadThumb: error closing stored full size: %s", err)
+			}
+		}()
+
+		// stream the file from storage straight into the derive thumbnail function
+		logrus.Tracef("loadThumb: calling deriveThumbnail %s", p.attachment.URL)
 		thumb, err := deriveThumbnail(stored, p.attachment.File.ContentType, createBlurhash)
 		if err != nil {
 			p.err = fmt.Errorf("loadThumb: error deriving thumbnail: %s", err)
@@ -137,13 +162,8 @@ func (p *ProcessingMedia) loadThumb(ctx context.Context) error {
 			return p.err
 		}
 
-		if err := stored.Close(); err != nil {
-			p.err = fmt.Errorf("loadThumb: error closing stored full size: %s", err)
-			atomic.StoreInt32(&p.thumbState, int32(errored))
-			return p.err
-		}
-
 		// put the thumbnail in storage
+		logrus.Tracef("loadThumb: storing new thumbnail %s", p.attachment.URL)
 		if err := p.storage.Put(p.attachment.Thumbnail.Path, thumb.small); err != nil {
 			p.err = fmt.Errorf("loadThumb: error storing thumbnail: %s", err)
 			atomic.StoreInt32(&p.thumbState, int32(errored))
@@ -164,6 +184,7 @@ func (p *ProcessingMedia) loadThumb(ctx context.Context) error {
 
 		// we're done processing the thumbnail!
 		atomic.StoreInt32(&p.thumbState, int32(complete))
+		logrus.Tracef("loadThumb: finished processing thumbnail for attachment %s", p.attachment.URL)
 		fallthrough
 	case complete:
 		return nil
@@ -224,6 +245,7 @@ func (p *ProcessingMedia) loadFullSize(ctx context.Context) error {
 
 		// we're done processing the full-size image
 		atomic.StoreInt32(&p.fullSizeState, int32(complete))
+		logrus.Tracef("loadFullSize: finished processing full size image for attachment %s", p.attachment.URL)
 		fallthrough
 	case complete:
 		return nil
@@ -248,6 +270,16 @@ func (p *ProcessingMedia) store(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("store: error executing data function: %s", err)
 	}
+	logrus.Tracef("store: reading %d bytes from data function for media %s", fileSize, p.attachment.URL)
+
+	// defer closing the reader when we're done with it
+	defer func() {
+		if rc, ok := reader.(io.ReadCloser); ok {
+			if err := rc.Close(); err != nil {
+				logrus.Errorf("store: error closing readcloser: %s", err)
+			}
+		}
+	}()
 
 	// extract no more than 261 bytes from the beginning of the file -- this is the header
 	firstBytes := make([]byte, maxFileHeaderBytes)
@@ -294,6 +326,15 @@ func (p *ProcessingMedia) store(ctx context.Context) error {
 		return fmt.Errorf("store: couldn't process %s", extension)
 	}
 
+	// defer closing the clean reader when we're done with it
+	defer func() {
+		if rc, ok := clean.(io.ReadCloser); ok {
+			if err := rc.Close(); err != nil {
+				logrus.Errorf("store: error closing clean readcloser: %s", err)
+			}
+		}
+	}()
+
 	// now set some additional fields on the attachment since
 	// we know more about what the underlying media actually is
 	p.attachment.URL = uris.GenerateURIForAttachment(p.attachment.AccountID, string(TypeAttachment), string(SizeOriginal), p.attachment.ID, extension)
@@ -305,20 +346,14 @@ func (p *ProcessingMedia) store(ctx context.Context) error {
 	if err := p.storage.PutStream(p.attachment.File.Path, clean); err != nil {
 		return fmt.Errorf("store: error storing stream: %s", err)
 	}
-
-	// if the original reader is a readcloser, close it since we're done with it now
-	if rc, ok := reader.(io.ReadCloser); ok {
-		if err := rc.Close(); err != nil {
-			return fmt.Errorf("store: error closing readcloser: %s", err)
-		}
-	}
-
+	p.attachment.Cached = true
 	p.read = true
 
 	if p.postData != nil {
 		return p.postData(ctx)
 	}
 
+	logrus.Tracef("store: finished storing initial data for attachment %s", p.attachment.URL)
 	return nil
 }
 
@@ -360,6 +395,7 @@ func (m *manager) preProcessMedia(ctx context.Context, data DataFunc, postData P
 		Thumbnail:         thumbnail,
 		Avatar:            false,
 		Header:            false,
+		Cached:            false,
 	}
 
 	// check if we have additional info to add to the attachment,
@@ -414,6 +450,27 @@ func (m *manager) preProcessMedia(ctx context.Context, data DataFunc, postData P
 		fullSizeState: int32(received),
 		database:      m.db,
 		storage:       m.storage,
+	}
+
+	return processingMedia, nil
+}
+
+func (m *manager) preProcessRecache(ctx context.Context, data DataFunc, postData PostDataCallbackFunc, attachmentID string) (*ProcessingMedia, error) {
+	// get the existing attachment
+	attachment, err := m.db.GetAttachmentByID(ctx, attachmentID)
+	if err != nil {
+		return nil, err
+	}
+
+	processingMedia := &ProcessingMedia{
+		attachment:    attachment,
+		data:          data,
+		postData:      postData,
+		thumbState:    int32(received),
+		fullSizeState: int32(received),
+		database:      m.db,
+		storage:       m.storage,
+		recache:       true, // indicate it's a recache
 	}
 
 	return processingMedia, nil

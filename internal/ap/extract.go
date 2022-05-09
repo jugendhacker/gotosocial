@@ -248,7 +248,10 @@ func ExtractSummary(i WithSummary) (string, error) {
 	}
 
 	for iter := summaryProp.Begin(); iter != summaryProp.End(); iter = iter.Next() {
-		if iter.IsXMLSchemaString() && iter.GetXMLSchemaString() != "" {
+		switch {
+		case iter.IsIRI():
+			return iter.GetIRI().String(), nil
+		case iter.IsXMLSchemaString():
 			return iter.GetXMLSchemaString(), nil
 		}
 	}
@@ -336,7 +339,7 @@ func ExtractPublicKeyForOwner(i WithPublicKey, forOwner *url.URL) (*rsa.PublicKe
 func ExtractContent(i WithContent) (string, error) {
 	contentProperty := i.GetActivityStreamsContent()
 	if contentProperty == nil {
-		return "", errors.New("content property was nil")
+		return "", nil
 	}
 	for iter := contentProperty.Begin(); iter != contentProperty.End(); iter = iter.Next() {
 		if iter.IsXMLSchemaString() && iter.GetXMLSchemaString() != "" {

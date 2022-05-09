@@ -32,7 +32,9 @@ import (
 	"github.com/superseriousbusiness/gotosocial/internal/db"
 	"github.com/superseriousbusiness/gotosocial/internal/federation/dereferencing"
 	"github.com/superseriousbusiness/gotosocial/internal/gtsmodel"
+	"github.com/superseriousbusiness/gotosocial/internal/messages"
 	"github.com/superseriousbusiness/gotosocial/internal/transport"
+	"github.com/superseriousbusiness/gotosocial/internal/worker"
 	"github.com/superseriousbusiness/gotosocial/testrig"
 )
 
@@ -50,17 +52,15 @@ type DereferencerStandardTestSuite struct {
 	dereferencer dereferencing.Dereferencer
 }
 
-func (suite *DereferencerStandardTestSuite) SetupSuite() {
+func (suite *DereferencerStandardTestSuite) SetupTest() {
+	testrig.InitTestConfig()
+	testrig.InitTestLog()
+
 	suite.testAccounts = testrig.NewTestAccounts()
 	suite.testRemoteStatuses = testrig.NewTestFediStatuses()
 	suite.testRemotePeople = testrig.NewTestFediPeople()
 	suite.testRemoteGroups = testrig.NewTestFediGroups()
 	suite.testRemoteAttachments = testrig.NewTestFediAttachments("../../../testrig/media")
-}
-
-func (suite *DereferencerStandardTestSuite) SetupTest() {
-	testrig.InitTestLog()
-	testrig.InitTestConfig()
 
 	suite.db = testrig.NewTestDB()
 	suite.storage = testrig.NewTestStorage()
@@ -150,6 +150,7 @@ func (suite *DereferencerStandardTestSuite) mockTransportController() transport.
 
 		return response, nil
 	}
+	fedWorker := worker.New[messages.FromFederator](-1, -1)
 	mockClient := testrig.NewMockHTTPClient(do)
-	return testrig.NewTestTransportController(mockClient, suite.db)
+	return testrig.NewTestTransportController(mockClient, suite.db, fedWorker)
 }

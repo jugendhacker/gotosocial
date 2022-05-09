@@ -22,6 +22,7 @@ import "github.com/superseriousbusiness/gotosocial/internal/config"
 
 var usage = config.KeyNames{
 	LogLevel:                   "Log level to run at: [trace, debug, info, warn, fatal]",
+	LogDbQueries:               "Log database queries verbosely when log-level is trace or debug",
 	ApplicationName:            "Name of the application, used in various places internally",
 	ConfigPath:                 "Path to a file containing gotosocial configuration. Values set in this file will be overwritten by values set as env vars or arguments",
 	Host:                       "Hostname to use for the server (eg., example.org, gotosocial.whatever.com). DO NOT change this on a server that's already run!",
@@ -47,6 +48,7 @@ var usage = config.KeyNames{
 	MediaVideoMaxSize:          "Max size of accepted videos in bytes",
 	MediaDescriptionMinChars:   "Min required chars for an image description",
 	MediaDescriptionMaxChars:   "Max permitted chars for an image description",
+	MediaRemoteCacheDays:       "Number of days to locally cache media from remote instances. If set to 0, remote media will be kept indefinitely.",
 	StorageBackend:             "Storage backend to use for media attachments",
 	StorageLocalBasePath:       "Full path to an already-created directory where gts should store/retrieve media files. Subfolders will be created within this dir.",
 	StatusesMaxChars:           "Max permitted characters for posted statuses",

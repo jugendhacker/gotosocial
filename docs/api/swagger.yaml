@@ -1798,7 +1798,7 @@ info:
     name: AGPL3
     url: https://www.gnu.org/licenses/agpl-3.0.en.html
   title: GoToSocial
-  version: 0.0.1
+  version: REPLACE_ME
 paths:
   /.well-known/nodeinfo:
     get:
@@ -2086,6 +2086,11 @@ paths:
         in: query
         name: exclude_replies
         type: boolean
+      - default: false
+        description: Exclude statuses that are a reblog/boost of another status.
+        in: query
+        name: exclude_reblogs
+        type: boolean
       - description: |-
           Return only statuses *OLDER* than the given max status ID.
           The status with the specified ID will not be included in the response.
@@ -2099,7 +2104,7 @@ paths:
         name: min_id
         type: string
       - default: false
-        description: Show only pinned statuses. In other words,e xclude statuses that
+        description: Show only pinned statuses. In other words, exclude statuses that
           are not pinned to the given account ID.
         in: query
         name: pinned_only
@@ -2189,6 +2194,31 @@ paths:
       - OAuth2 Bearer:
         - write:follows
       summary: Unfollow account with id.
+      tags:
+      - accounts
+  /api/v1/accounts/delete:
+    post:
+      consumes:
+      - multipart/form-data
+      operationId: accountDelete
+      parameters:
+      - description: Password of the account user, for confirmation.
+        in: formData
+        name: password
+        required: true
+        type: string
+      responses:
+        "202":
+          description: The account deletion has been accepted and the account will
+            be deleted.
+        "400":
+          description: bad request
+        "401":
+          description: unauthorized
+      security:
+      - OAuth2 Bearer:
+        - write:accounts
+      summary: Delete your account.
       tags:
       - accounts
   /api/v1/accounts/relationships:
@@ -2311,6 +2341,43 @@ paths:
       summary: Verify a token by returning account details pertaining to it.
       tags:
       - accounts
+  /api/v1/admin/accounts/{id}/action:
+    post:
+      consumes:
+      - multipart/form-data
+      operationId: adminAccountAction
+      parameters:
+      - description: ID of the account.
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 'Type of action to be taken. One of: disable, silence, suspend.'
+        in: formData
+        name: type
+        required: true
+        type: string
+      - description: Optional text describing why this action was taken.
+        in: formData
+        name: text
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+        "400":
+          description: bad request
+        "401":
+          description: unauthorized
+        "403":
+          description: forbidden
+      security:
+      - OAuth2 Bearer:
+        - admin
+      summary: Perform an admin action on an account.
+      tags:
+      - admin
   /api/v1/admin/custom_emojis:
     post:
       consumes:
@@ -2341,6 +2408,8 @@ paths:
           description: bad request
         "403":
           description: forbidden
+        "409":
+          description: conflict -- domain/shortcode combo for emoji already exists
       security:
       - OAuth2 Bearer:
         - admin

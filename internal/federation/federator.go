@@ -27,6 +27,7 @@ import (
 	"github.com/superseriousbusiness/gotosocial/internal/db"
 	"github.com/superseriousbusiness/gotosocial/internal/federation/dereferencing"
 	"github.com/superseriousbusiness/gotosocial/internal/federation/federatingdb"
+	"github.com/superseriousbusiness/gotosocial/internal/gtserror"
 	"github.com/superseriousbusiness/gotosocial/internal/gtsmodel"
 	"github.com/superseriousbusiness/gotosocial/internal/media"
 	"github.com/superseriousbusiness/gotosocial/internal/transport"
@@ -39,6 +40,8 @@ type Federator interface {
 	FederatingActor() pub.FederatingActor
 	// FederatingDB returns the underlying FederatingDB interface.
 	FederatingDB() federatingdb.DB
+	// TransportController returns the underlying transport controller.
+	TransportController() transport.Controller
 
 	// AuthenticateFederatedRequest can be used to check the authenticity of incoming http-signed requests for federating resources.
 	// The given username will be used to create a transport for making outgoing requests. See the implementation for more detailed comments.
@@ -48,7 +51,7 @@ type Federator interface {
 	// If the request does not pass authentication, or there's a domain block, nil, false, nil will be returned.
 	//
 	// If something goes wrong during authentication, nil, false, and an error will be returned.
-	AuthenticateFederatedRequest(ctx context.Context, username string) (*url.URL, bool, error)
+	AuthenticateFederatedRequest(ctx context.Context, username string) (*url.URL, gtserror.WithCode)
 
 	// FingerRemoteAccount performs a webfinger lookup for a remote account, using the .well-known path. It will return the ActivityPub URI for that
 	// account, or an error if it doesn't exist or can't be retrieved.
@@ -106,4 +109,8 @@ func (f *federator) FederatingActor() pub.FederatingActor {
 
 func (f *federator) FederatingDB() federatingdb.DB {
 	return f.federatingDB
+}
+
+func (f *federator) TransportController() transport.Controller {
+	return f.transportController
 }

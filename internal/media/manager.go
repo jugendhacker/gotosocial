@@ -20,13 +20,16 @@ package media
 
 import (
 	"context"
-	"errors"
-	"runtime"
+	"fmt"
+	"time"
 
-	"codeberg.org/gruf/go-runners"
 	"codeberg.org/gruf/go-store/kv"
+	"github.com/robfig/cron/v3"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
+	"github.com/superseriousbusiness/gotosocial/internal/config"
 	"github.com/superseriousbusiness/gotosocial/internal/db"
+	"github.com/superseriousbusiness/gotosocial/internal/worker"
 )
 
 // Manager provides an interface for managing media: parsing, storing, and retrieving media objects like photos, videos, and gifs.
@@ -61,14 +64,12 @@ type Manager interface {
 	//
 	// ai is optional and can be nil. Any additional information about the emoji provided will be put in the database.
 	ProcessEmoji(ctx context.Context, data DataFunc, postData PostDataCallbackFunc, shortcode string, id string, uri string, ai *AdditionalEmojiInfo) (*ProcessingEmoji, error)
-	// NumWorkers returns the total number of workers available to this manager.
-	NumWorkers() int
-	// QueueSize returns the total capacity of the queue.
-	QueueSize() int
-	// JobsQueued returns the number of jobs currently in the task queue.
-	JobsQueued() int
-	// ActiveWorkers returns the number of workers currently performing jobs.
-	ActiveWorkers() int
+	// RecacheMedia refetches, reprocesses, and recaches an existing attachment that has been uncached via pruneRemote.
+	RecacheMedia(ctx context.Context, data DataFunc, postData PostDataCallbackFunc, attachmentID string) (*ProcessingMedia, error)
+	// PruneRemote prunes all remote media cached on this instance that's older than the given amount of days.
+	// 'Pruning' in this context means removing the locally stored data of the attachment (both thumbnail and full size),
+	// and setting 'cached' to false on the associated attachment.
+	PruneRemote(ctx context.Context, olderThanDays int) (int, error)
 	// Stop stops the underlying worker pool of the manager. It should be called
 	// when closing GoToSocial in order to cleanly finish any in-progress jobs.
 	// It will block until workers are finished processing.
@@ -76,46 +77,105 @@ type Manager interface {
 }
 
 type manager struct {
-	db         db.DB
-	storage    *kv.KVStore
-	pool       runners.WorkerPool
-	numWorkers int
-	queueSize  int
+	db           db.DB
+	storage      *kv.KVStore
+	emojiWorker  *worker.Worker[*ProcessingEmoji]
+	mediaWorker  *worker.Worker[*ProcessingMedia]
+	stopCronJobs func() error
 }
 
 // NewManager returns a media manager with the given db and underlying storage.
 //
 // A worker pool will also be initialized for the manager, to ensure that only
-// a limited number of media will be processed in parallel.
-//
-// The number of workers will be the number of CPUs available to the Go runtime,
-// divided by 2 (rounding down, but always at least 1).
-//
-// The length of the queue will be the number of workers multiplied by 10.
-//
-// So for an 8 core machine, the media manager will get 4 workers, and a queue of length 40.
-// For a 4 core machine, this will be 2 workers, and a queue length of 20.
-// For a single or 2-core machine, the media manager will get 1 worker, and a queue of length 10.
+// a limited number of media will be processed in parallel. The numbers of workers
+// is determined from the $GOMAXPROCS environment variable (usually no. CPU cores).
+// See internal/worker.New() documentation for further information.
 func NewManager(database db.DB, storage *kv.KVStore) (Manager, error) {
-	numWorkers := runtime.NumCPU() / 2
-	// make sure we always have at least 1 worker even on single-core machines
-	if numWorkers == 0 {
-		numWorkers = 1
-	}
-	queueSize := numWorkers * 10
-
 	m := &manager{
-		db:         database,
-		storage:    storage,
-		pool:       runners.NewWorkerPool(numWorkers, queueSize),
-		numWorkers: numWorkers,
-		queueSize:  queueSize,
+		db:      database,
+		storage: storage,
 	}
 
-	if start := m.pool.Start(); !start {
-		return nil, errors.New("could not start worker pool")
+	// Prepare the media worker pool
+	m.mediaWorker = worker.New[*ProcessingMedia](-1, 10)
+	m.mediaWorker.SetProcessor(func(ctx context.Context, media *ProcessingMedia) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := media.LoadAttachment(ctx); err != nil {
+			return fmt.Errorf("error loading media %s: %v", media.AttachmentID(), err)
+		}
+		return nil
+	})
+
+	// Prepare the emoji worker pool
+	m.emojiWorker = worker.New[*ProcessingEmoji](-1, 10)
+	m.emojiWorker.SetProcessor(func(ctx context.Context, emoji *ProcessingEmoji) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := emoji.LoadEmoji(ctx); err != nil {
+			return fmt.Errorf("error loading emoji %s: %v", emoji.EmojiID(), err)
+		}
+		return nil
+	})
+
+	// Start the worker pools
+	if err := m.mediaWorker.Start(); err != nil {
+		return nil, err
 	}
-	logrus.Debugf("started media manager worker pool with %d workers and queue capacity of %d", numWorkers, queueSize)
+	if err := m.emojiWorker.Start(); err != nil {
+		return nil, err
+	}
+
+	// start remote cache cleanup cronjob if configured
+	cacheCleanupDays := viper.GetInt(config.Keys.MediaRemoteCacheDays)
+	if cacheCleanupDays != 0 {
+		// we need a way of cancelling running jobs if the media manager is told to stop
+		pruneCtx, pruneCancel := context.WithCancel(context.Background())
+
+		// create a new cron instance and add a function to it
+		c := cron.New(cron.WithLogger(&logrusWrapper{}))
+
+		pruneFunc := func() {
+			begin := time.Now()
+			pruned, err := m.PruneRemote(pruneCtx, cacheCleanupDays)
+			if err != nil {
+				logrus.Errorf("media manager: error pruning remote cache: %s", err)
+				return
+			}
+			logrus.Infof("media manager: pruned %d remote cache entries in %s", pruned, time.Since(begin))
+		}
+
+		// run every night
+		entryID, err := c.AddFunc("@midnight", pruneFunc)
+		if err != nil {
+			pruneCancel()
+			return nil, fmt.Errorf("error starting media manager remote cache cleanup job: %s", err)
+		}
+
+		// since we're running a cron job, we should define how the manager should stop them
+		m.stopCronJobs = func() error {
+			// try to stop any jobs gracefully by waiting til they're finished
+			cronCtx := c.Stop()
+
+			select {
+			case <-cronCtx.Done():
+				logrus.Infof("media manager: cron finished jobs and stopped gracefully")
+			case <-time.After(1 * time.Minute):
+				logrus.Infof("media manager: cron didn't stop after 60 seconds, will force close")
+				break
+			}
+
+			// whether the job is finished neatly or we had to wait a minute, cancel the context on the prune job
+			pruneCancel()
+			return nil
+		}
+
+		// now start all the cron stuff we've lined up
+		c.Start()
+		logrus.Infof("media manager: next scheduled remote cache cleanup is %q", c.Entry(entryID).Next)
+	}
 
 	return m, nil
 }
@@ -125,22 +185,7 @@ func (m *manager) ProcessMedia(ctx context.Context, data DataFunc, postData Post
 	if err != nil {
 		return nil, err
 	}
-
-	logrus.Tracef("ProcessMedia: about to enqueue media with attachmentID %s, queue length is %d", processingMedia.AttachmentID(), m.pool.Queue())
-	m.pool.Enqueue(func(innerCtx context.Context) {
-		select {
-		case <-innerCtx.Done():
-			// if the inner context is done that means the worker pool is closing, so we should just return
-			return
-		default:
-			// start loading the media already for the caller's convenience
-			if _, err := processingMedia.LoadAttachment(innerCtx); err != nil {
-				logrus.Errorf("ProcessMedia: error processing media with attachmentID %s: %s", processingMedia.AttachmentID(), err)
-			}
-		}
-	})
-	logrus.Tracef("ProcessMedia: succesfully queued media with attachmentID %s, queue length is %d", processingMedia.AttachmentID(), m.pool.Queue())
-
+	m.mediaWorker.Queue(processingMedia)
 	return processingMedia, nil
 }
 
@@ -149,47 +194,35 @@ func (m *manager) ProcessEmoji(ctx context.Context, data DataFunc, postData Post
 	if err != nil {
 		return nil, err
 	}
-
-	logrus.Tracef("ProcessEmoji: about to enqueue emoji with id %s, queue length is %d", processingEmoji.EmojiID(), m.pool.Queue())
-	m.pool.Enqueue(func(innerCtx context.Context) {
-		select {
-		case <-innerCtx.Done():
-			// if the inner context is done that means the worker pool is closing, so we should just return
-			return
-		default:
-			// start loading the emoji already for the caller's convenience
-			if _, err := processingEmoji.LoadEmoji(innerCtx); err != nil {
-				logrus.Errorf("ProcessEmoji: error processing emoji with id %s: %s", processingEmoji.EmojiID(), err)
-			}
-		}
-	})
-	logrus.Tracef("ProcessEmoji: succesfully queued emoji with id %s, queue length is %d", processingEmoji.EmojiID(), m.pool.Queue())
-
+	m.emojiWorker.Queue(processingEmoji)
 	return processingEmoji, nil
 }
 
-func (m *manager) NumWorkers() int {
-	return m.numWorkers
-}
-
-func (m *manager) QueueSize() int {
-	return m.queueSize
-}
-
-func (m *manager) JobsQueued() int {
-	return m.pool.Queue()
-}
-
-func (m *manager) ActiveWorkers() int {
-	return m.pool.Workers()
+func (m *manager) RecacheMedia(ctx context.Context, data DataFunc, postData PostDataCallbackFunc, attachmentID string) (*ProcessingMedia, error) {
+	processingRecache, err := m.preProcessRecache(ctx, data, postData, attachmentID)
+	if err != nil {
+		return nil, err
+	}
+	m.mediaWorker.Queue(processingRecache)
+	return processingRecache, nil
 }
 
 func (m *manager) Stop() error {
-	logrus.Info("stopping media manager worker pool")
+	// Stop media and emoji worker pools
+	mediaErr := m.mediaWorker.Stop()
+	emojiErr := m.emojiWorker.Stop()
 
-	stopped := m.pool.Stop()
-	if !stopped {
-		return errors.New("could not stop media manager worker pool")
+	var cronErr error
+
+	if m.stopCronJobs != nil {
+		// only set if cache prune age > 0
+		cronErr = m.stopCronJobs()
 	}
-	return nil
+
+	if mediaErr != nil {
+		return mediaErr
+	} else if emojiErr != nil {
+		return emojiErr
+	}
+	return cronErr
 }
