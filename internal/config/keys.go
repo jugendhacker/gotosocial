@@ -88,11 +88,12 @@ type KeyNames struct {
 	OIDCScopes           string
 
 	// smtp
-	SMTPHost     string
-	SMTPPort     string
-	SMTPUsername string
-	SMTPPassword string
-	SMTPFrom     string
+	SMTPHost      string
+	SMTPPort      string
+	SMTPUsername  string
+	SMTPPassword  string
+	SMTPFrom      string
+	SMTPDirectTLS string
 
 	// syslog
 	SyslogEnabled  string
@@ -165,11 +166,12 @@ var Keys = KeyNames{
 	OIDCClientSecret:     "oidc-client-secret",
 	OIDCScopes:           "oidc-scopes",
 
-	SMTPHost:     "smtp-host",
-	SMTPPort:     "smtp-port",
-	SMTPUsername: "smtp-username",
-	SMTPPassword: "smtp-password",
-	SMTPFrom:     "smtp-from",
+	SMTPHost:      "smtp-host",
+	SMTPPort:      "smtp-port",
+	SMTPUsername:  "smtp-username",
+	SMTPPassword:  "smtp-password",
+	SMTPFrom:      "smtp-from",
+	SMTPDirectTLS: "smtp-direct-tls",
 
 	SyslogEnabled:  "syslog-enabled",
 	SyslogProtocol: "syslog-protocol",

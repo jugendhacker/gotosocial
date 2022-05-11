@@ -78,11 +78,12 @@ var Defaults = Values{
 	OIDCClientSecret:     "",
 	OIDCScopes:           []string{oidc.ScopeOpenID, "profile", "email", "groups"},
 
-	SMTPHost:     "",
-	SMTPPort:     0,
-	SMTPUsername: "",
-	SMTPPassword: "",
-	SMTPFrom:     "GoToSocial",
+	SMTPHost:      "",
+	SMTPPort:      0,
+	SMTPUsername:  "",
+	SMTPPassword:  "",
+	SMTPFrom:      "GoToSocial",
+	SMTPDirectTLS: false,
 
 	SyslogEnabled:  false,
 	SyslogProtocol: "udp",

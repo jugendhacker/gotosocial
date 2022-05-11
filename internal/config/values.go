@@ -76,11 +76,12 @@ type Values struct {
 	OIDCClientSecret     string
 	OIDCScopes           []string
 
-	SMTPHost     string
-	SMTPPort     int
-	SMTPUsername string
-	SMTPPassword string
-	SMTPFrom     string
+	SMTPHost      string
+	SMTPPort      int
+	SMTPUsername  string
+	SMTPPassword  string
+	SMTPFrom      string
+	SMTPDirectTLS bool
 
 	SyslogEnabled  bool
 	SyslogProtocol string

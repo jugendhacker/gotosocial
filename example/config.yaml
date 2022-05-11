@@ -386,6 +386,11 @@ smtp-host: ""
 # Default: 0
 smtp-port: 0
 
+# Wherever to use direct TLS to connect to the SMTP or let the golang handle it via StartTLS
+# Examples: [true, false]
+# Default: false
+smtp-direct-tls: false
+
 # String. Username to use when authenticating with the smtp server.
 # This should have been provided to you by your smtp host.
 # This is often, but not always, an email address.

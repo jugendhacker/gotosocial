@@ -51,18 +51,23 @@ func NewSender() (Sender, error) {
 	host := viper.GetString(keys.SMTPHost)
 	port := viper.GetInt(keys.SMTPPort)
 	from := viper.GetString(keys.SMTPFrom)
+	directTLS := viper.GetBool(keys.SMTPDirectTLS)
 
 	return &sender{
-		hostAddress: fmt.Sprintf("%s:%d", host, port),
-		from:        from,
-		auth:        smtp.PlainAuth("", username, password, host),
-		template:    t,
+		hostAddress:  fmt.Sprintf("%s:%d", host, port),
+		serverName:   host,
+		useDirectTLS: directTLS,
+		from:         from,
+		auth:         smtp.PlainAuth("", username, password, host),
+		template:     t,
 	}, nil
 }
 
 type sender struct {
-	hostAddress string
-	from        string
-	auth        smtp.Auth
-	template    *template.Template
+	hostAddress  string
+	useDirectTLS bool
+	serverName   string
+	from         string
+	auth         smtp.Auth
+	template     *template.Template
 }

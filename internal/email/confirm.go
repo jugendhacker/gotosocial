@@ -20,6 +20,8 @@ package email
 
 import (
 	"bytes"
+	"crypto/tls"
+	"net"
 	"net/smtp"
 
 	"github.com/sirupsen/logrus"
@@ -44,7 +46,46 @@ func (s *sender) SendConfirmEmail(toAddress string, data ConfirmData) error {
 		return err
 	}
 	logrus.WithField("func", "SendConfirmEmail").Trace(s.hostAddress + "\n" + viper.GetString(config.Keys.SMTPUsername) + ":password" + "\n" + s.from + "\n" + toAddress + "\n\n" + string(msg) + "\n")
-	return smtp.SendMail(s.hostAddress, s.auth, s.from, []string{toAddress}, msg)
+	if !s.useDirectTLS {
+		return smtp.SendMail(s.hostAddress, s.auth, s.from, []string{toAddress}, msg)
+	} else {
+		conn, err := net.Dial("tcp", s.hostAddress)
+		if err != nil {
+			return err
+		}
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: s.serverName})
+		client, err := smtp.NewClient(tlsConn, s.hostAddress)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			client.Close()
+			tlsConn.Close()
+			conn.Close()
+		}()
+		if err = client.Auth(s.auth); err != nil {
+			return err
+		}
+		if err = client.Mail(s.from); err != nil {
+			return err
+		}
+		if err = client.Rcpt(toAddress); err != nil {
+			return err
+		}
+		writer, err := client.Data()
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(msg)
+		if err != nil {
+			return err
+		}
+		err = writer.Close()
+		if err != nil {
+			return err
+		}
+		return client.Quit()
+	}
 }
 
 // ConfirmData represents data passed into the confirm email address template.
